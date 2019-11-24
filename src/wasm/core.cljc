@@ -1,5 +1,5 @@
 (ns wasm.core
-  (:import (clojure.lang PersistentVector)))
+  #?(:cljs (:import [goog.string StringBuffer])))
 
 (def ^:dynamic ^StringBuilder out)
 (def ^:dynamic compiler-env)
@@ -364,7 +364,8 @@
     :else form))
 
 (defn compile-wasm [form]
-  (binding [out (StringBuilder.)
+  (binding [out #?(:clj (StringBuilder.)
+                   :cljs (StringBuffer.))
             compiler-env (default-compiler-env)]
-    (-> form (analyze nil) emit)
+    (emit (analyze form nil))
     (.toString out)))
