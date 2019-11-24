@@ -1,5 +1,6 @@
 (ns wasm.core
-  #?(:cljs (:import [goog.string StringBuffer])))
+  #?(:cljs (:import [goog.string StringBuffer]))
+  (:require [clojure.string :as str]))
 
 (def ^:dynamic ^StringBuilder out)
 (def ^:dynamic compiler-env)
@@ -27,10 +28,17 @@
   ([s]
    (emits "\n" s)))
 
-
 (defn munge-name [s]
-  (str "$" s))
-
+  (str "$"
+    (-> s
+        (str/replace "?" "_QMARK_")
+        (str/replace "!" "_BANG_")
+        (str/replace "*" "_STAR_")
+        (str/replace "-" "_")
+        (str/replace "+" "_PLUS_")
+        (str/replace ">" "_GT_")
+        (str/replace "<" "_LT_")
+        (str/replace "=" "_EQ_"))))
 
 (defmulti emit (fn [ast] (:op ast)))
 
@@ -74,8 +82,8 @@
   #_#_#_(emits "(elem (i32.const "
                (dec (count (:defs-order @compiler-env)))
                ") ")
-  (emit name)
-  (emits ")")
+      (emit name)
+      (emits ")")
   (emit-fn-ret-type ast)
 
   (emitln "(func ")
@@ -92,7 +100,9 @@
     (emit expr))
   (emits ")")
   (emitln "(export ")
-  (emits "\"" (:name name) "\" (func ")
+  (let [var-name (cond-> (:name name)
+                         (-> ast :meta :export true? not) munge-name)]
+    (emits "\"" var-name "\" (func "))
   (emit name)
   (emits "))"))
 
@@ -147,7 +157,7 @@
 (defmethod emit 'invoke [{:keys [name args]}]
   (emitln "(call ")
   #_#_(emitln "(call_indirect ")
-  (emit-type (:name name))
+      (emit-type (:name name))
   (emit name)
   (emits " ")
   (doseq [expr args]
@@ -214,13 +224,13 @@
             (assert (contains? types ret-tag) "invalid function return type"))
         args (map (comp parse-argument #(analyze % env)) args)
         [body fn-locals] (binding [*fn-locals* (atom (index-by (comp :name :id) args))]
-                          [(doall
-                             (for [expr body]
-                               (let [ast (analyze expr nil)]
-                                 (if (= 'id (:op ast))
-                                   (parse-local ast)
-                                   ast))))
-                           @*fn-locals*])
+                           [(doall
+                              (for [expr body]
+                                (let [ast (analyze expr nil)]
+                                  (if (= 'id (:op ast))
+                                    (parse-local ast)
+                                    ast))))
+                            @*fn-locals*])
         inferred-ret-tag (-> body last :tag)
         _ (assert (or (some? inferred-ret-tag) (some? ret-tag))
                   (str "Couldn't infer return type of " name
@@ -230,6 +240,7 @@
                     (str "Return type " ret-tag " doesn't match inferred type "
                          inferred-ret-tag " in " name)))
         ast {:op 'fn
+             :meta (meta name)
              :ret-tag (or inferred-ret-tag ret-tag)
              :name (parse-symbol name)
              :args args
@@ -245,10 +256,20 @@
          env))
 
 (defmethod parse '+ [[_ left right] env]
-  (let [left (parse-local (analyze left env))
-        right (parse-local (analyze right env))
-        ltag (get-in @*fn-locals* [(-> left :id :name) :tag])
-        rtag (get-in @*fn-locals* [(-> right :id :name) :tag])
+  (let [left (let [e (analyze left env)]
+               (if (= 'id (:op e))
+                 (parse-local e)
+                 e))
+        right (let [e (analyze right env)]
+                (if (= 'id (:op e))
+                  (parse-local e)
+                  e))
+        ltag (if (= 'const (:op left))
+               (:tag left)
+               (get-in @*fn-locals* [(-> left :id :name) :tag]))
+        rtag (if (= 'const (:op right))
+               (:tag right)
+               (get-in @*fn-locals* [(-> right :id :name) :tag]))
         _ (assert (= ltag rtag) (str "Can't + values of different types " ltag " and " rtag))]
     {:op '+
      :tag ltag
@@ -257,10 +278,20 @@
      :children [:left :right]}))
 
 (defmethod parse '= [[_ left right] env]
-  (let [left (parse-local (analyze left env))
-        right (parse-local (analyze right env))
-        ltag (get-in @*fn-locals* [(-> left :id :name) :tag])
-        rtag (get-in @*fn-locals* [(-> right :id :name) :tag])
+  (let [left (let [e (analyze left env)]
+               (if (= 'id (:op e))
+                 (parse-local e)
+                 e))
+        right (let [e (analyze right env)]
+                (if (= 'id (:op e))
+                  (parse-local e)
+                  e))
+        ltag (if (= 'const (:op left))
+               (:tag left)
+               (get-in @*fn-locals* [(-> left :id :name) :tag]))
+        rtag (if (= 'const (:op right))
+               (:tag right)
+               (get-in @*fn-locals* [(-> right :id :name) :tag]))
         _ (assert (= ltag rtag) (str "Can't = values of different types " ltag " and " rtag))]
     {:op '=
      :tag ltag
@@ -351,6 +382,11 @@
      :tag tag
      :form form}))
 
+(defn parse-boolean [form]
+  (if (true? form)
+    (parse-number 1)
+    (parse-number 0)))
+
 (defn analyze-seq [form env]
   (cond
     (contains? specials (first form)) (parse form env)
@@ -361,6 +397,7 @@
     (list? form) (analyze-seq form env)
     (symbol? form) (parse-symbol form)
     (number? form) (parse-number form)
+    (boolean? form) (parse-boolean form)
     :else form))
 
 (defn compile-wasm [form]
