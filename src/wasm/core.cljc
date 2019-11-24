@@ -148,8 +148,11 @@
   (emits ")"))
 
 (defmethod emit 'const [{:keys [tag form]}]
-  (emitln "(")
-  (emits tag ".const " form ")"))
+  (case tag
+    'string (do (emitln "(data (i32.const 16) ")
+                (emits "\"" form "\")"))
+    (do (emitln "(")
+        (emits tag ".const " form ")"))))
 
 (defn emit-type [type]
   (emits "(type $return_" type ")"))
@@ -387,6 +390,11 @@
     (parse-number 1)
     (parse-number 0)))
 
+(defn parse-string [form]
+  {:op 'const
+   :tag 'string
+   :form form})
+
 (defn analyze-seq [form env]
   (cond
     (contains? specials (first form)) (parse form env)
@@ -398,11 +406,13 @@
     (symbol? form) (parse-symbol form)
     (number? form) (parse-number form)
     (boolean? form) (parse-boolean form)
+    (string? form) (parse-string form)
     :else form))
 
 (defn compile-wasm [form]
   (binding [out #?(:clj (StringBuilder.)
                    :cljs (StringBuffer.))
             compiler-env (default-compiler-env)]
-    (emit (analyze form nil))
-    (.toString out)))
+    (let [env (atom {:constants {}})]
+      (emit (analyze form nil))
+      (.toString out))))
